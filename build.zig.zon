@@ -1,0 +1,12 @@
+.{
+    .name = .zig_sokoban_solver,
+    .version = "0.1.0",
+    .fingerprint = 0xa420a2c9fb49199,
+    .minimum_zig_version = "0.15.1",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        ".",
+    },
+}
