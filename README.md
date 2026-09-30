@@ -24,23 +24,26 @@ The maze number corresponds to the "Maze: N" entries in `sokoban-maps-60.txt` (0
 $ zig build run -- 1
 Maze 1 (22x11, 6 boxes)
 Solving...
-  solved after 98019 states explored
-Solution (746 steps, 116 pushes):
-ullluuuLLUllDlldddrRR...
+  solved after 38337 states explored
+Solution (578 steps, 116 pushes):
 ```
 
-or
+The next line contains the complete movement sequence.
+
+### Search limits
+
+Defaults are 5 million expanded states, 1 million stored nodes (including replaced
+paths retained for reconstruction), and 256 MiB of live search allocations.
+Allocator metadata and stack memory are additional, so the allocation budget is
+not a strict process RSS limit.
 
 ```sh
-zig build run -- 40
-Maze 40 (11x11, 8 boxes)
-Solving...
-  explored 100000 states, queue 219689, f=81
-  explored 200000 states, queue 450241, f=81
-  solved after 254011 states explored
-Solution (546 steps, 81 pushes):
-dDulLLLDDrdrrrdDuullullulluRdrdrddrddLruuuulluluRddrddldlluuUdddrddlUUUUddrruruuluullldRurrddrddrddlLuuruulDrdrddllulluuRRurDrrrddrdLLruuullulluuRldddrrrrdddlLLruuullllddrrUdllddrUluRluurRuuurRllddrrddddlLrruuuulluurrRllllldRurrrrdrDDllullddRUrrrDDuullllllddddrUrUUrurrrddrdLLLrruuullldlddlluRdrUlluurRllUdrruRldllddrrUrUrrruululllDurrrdrdddddllLLulluurRddllddrUluRdrrrrruuuuuluurDDDuullllllldRddrrRllluuurrdDuulldddrRuuurrrdrdDuuulllldddlldddrrUlluuuuurrrrrdrddDuuuulllllldRlddddrrUdlluuuuurrrrrdrdddDrdLLruuuuuullllDurrrdrdddddlLLLullddrUluRdrU
+zig build run -- 40 --max-expanded 5000000 --max-stored 2000000 --memory-mib 512
 ```
+
+The executable exits with status 2 and reports that solvability is unknown when a
+limit is reached. `No solution found.` means the search proved the puzzle
+unsolvable, rather than exhausting a resource budget. Invalid arguments exit 1.
 
 ### Output format
 
@@ -77,13 +80,22 @@ The solver uses **A\* search** over the push state space, minimizing pushes rath
 
 ## Performance
 
-| Maze | Boxes | States explored | Time |
-|------|-------|----------------|------|
-| 0 | 2 | 1 | instant |
-| 1 | 6 | 98K | ~2s |
-| 40 | 8 | 254K | ~6s |
+Local Apple Silicon/macOS measurements with Zig 0.16.0, ReleaseFast, median of
+five runs (September 2026). Baseline is commit `31f0658`; timings vary by machine.
 
-Puzzles with up to ~8 boxes typically solve within seconds. Puzzles with 10+ boxes may exceed the 5 million state limit due to combinatorial state space growth.
+| Maze | Baseline time | Improved time | States before → after | Pushes |
+|------|---------------|---------------|-----------------------|--------|
+| 1 | 0.235s | 0.069s | 98,019 → 38,337 | 116 |
+| 40 | 1.445s | 0.273s | 254,011 → 52,190 | 81 |
+
+A single full-suite run with a two-second timeout per map solved mazes 0, 1, and 40
+in both builds. The baseline timed out on 51 maps and crashed on 7 maps whose box
+counts exceeded its arrays. The improved build hit a resource budget on 15
+maps and timed out on 43, with no crashes. Every returned solution was verified.
+This short benchmark demonstrates faster existing solves and safe handling of
+large maps, not increased coverage of the difficult puzzles.
+
+Larger puzzles can still exhaust the configured search limits. Exact matching avoids the old exponential assignment cost, but the number of box arrangements remains large.
 
 ## Tests
 
@@ -91,4 +103,20 @@ Puzzles with up to ~8 boxes typically solve within seconds. Puzzles with 10+ box
 zig build test
 ```
 
-Tests parse and solve mazes 0, 1, and 40, verifying each solution by simulating every step. Additional unit tests cover dead cell detection, error handling, and input validation.
+Tests verify solutions for mazes 0, 1, and 40, parse all 61 bundled maps, and compare
+A* with an independent player-step Dijkstra solver on 348 small boards. Assignment
+algorithms are checked against exhaustive permutations. Tests also cover hash
+collisions, search limits, parser validation, and cleanup at every allocation
+failure point in a small search.
+
+To benchmark all maps with a per-map timeout and independently verify each
+returned movement sequence (Python 3 required):
+
+```sh
+zig build
+python3 scripts/benchmark.py --timeout 2 --output /tmp/sokoban-results.json
+```
+
+Use `--mazes 0 1 40` for a subset or `--binary /path/to/sokoban-solver` to compare
+another build. Results distinguish solutions, proven unsolvability, resource
+limits, timeouts, and errors.

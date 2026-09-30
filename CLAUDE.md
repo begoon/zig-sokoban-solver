@@ -9,7 +9,7 @@ Zig 0.16 Sokoban puzzle solver. Single-file implementation in `main.zig`.
 ```
 zig build              # build (ReleaseFast)
 zig build run -- 1     # solve maze 1
-zig build test         # run tests (mazes 0, 1, 40 + unit tests)
+zig build test         # solutions, small-board oracle, matching, limits, parser tests
 ```
 
 ## Map file
@@ -39,11 +39,12 @@ Encoding: `X` wall, `@` player, `*` box (off target), `.` target, `&` box on tar
 ## Performance
 
 - Mazes up to ~8 boxes: seconds.
-- 10+ boxes: may hit 5M state limit. State space grows combinatorially.
-- Main bottleneck: A* heuristic doesn't discriminate enough for large open maps - degrades toward BFS.
+- Default budgets: 5M expansions, 1M stored nodes, 256 MiB live search allocations. CLI flags override them; exhaustion exits 2 and does not imply unsolvability.
+- Larger/open puzzles still have large equal-f search frontiers. Benchmark changes with `python3 scripts/benchmark.py --timeout 2 --output /tmp/results.json`.
 
 ## Key files
 
 - `main.zig` - everything: parser, solver, tests
 - `sokoban-maps-60.txt` - puzzle data
 - `build.zig` / `build.zig.zon` - build config
+- `scripts/benchmark.py` - timeout-bounded full-map benchmark with independent solution verification

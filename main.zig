@@ -527,9 +527,78 @@ const BfsNode = struct {
     pushes: u32, // g-cost: number of pushes so far
 };
 
-const MAX_STATES = 5_000_000;
+const SearchLimits = struct {
+    max_expanded: u32 = 5_000_000,
+    max_stored: u32 = 1_000_000,
+    memory_bytes: usize = 256 * 1024 * 1024,
+};
+
+// Bounds live allocation requests, including spare capacities and the temporary
+// overlap when a container grows. Allocator metadata and stack are not included.
+const BudgetAllocator = struct {
+    child: std.mem.Allocator,
+    limit: usize,
+    used: usize = 0,
+    denied: bool = false,
+
+    fn allocator(self: *BudgetAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+
+    fn permits(self: *BudgetAllocator, old: usize, new: usize) bool {
+        if (new > self.limit - (self.used - old)) {
+            self.denied = true;
+            return false;
+        }
+        return true;
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *BudgetAllocator = @ptrCast(@alignCast(ctx));
+        if (!self.permits(0, len)) return null;
+        const ptr = self.child.rawAlloc(len, alignment, ra) orelse return null;
+        self.used += len;
+        return ptr;
+    }
+
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, len: usize, ra: usize) bool {
+        const self: *BudgetAllocator = @ptrCast(@alignCast(ctx));
+        if (!self.permits(memory.len, len)) return false;
+        if (!self.child.rawResize(memory, alignment, len, ra)) return false;
+        self.used = self.used - memory.len + len;
+        return true;
+    }
+
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, len: usize, ra: usize) ?[*]u8 {
+        const self: *BudgetAllocator = @ptrCast(@alignCast(ctx));
+        if (!self.permits(memory.len, len)) return null;
+        const ptr = self.child.rawRemap(memory, alignment, len, ra) orelse return null;
+        self.used = self.used - memory.len + len;
+        return ptr;
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *BudgetAllocator = @ptrCast(@alignCast(ctx));
+        self.child.rawFree(memory, alignment, ra);
+        self.used -= memory.len;
+    }
+};
 
 fn solve(grid: *const Grid, initial_player: Pos, initial_boxes: *const BitBoard, allocator: std.mem.Allocator) !?[]u8 {
+    return solveWithLimits(grid, initial_player, initial_boxes, allocator, .{});
+}
+
+fn solveWithLimits(grid: *const Grid, initial_player: Pos, initial_boxes: *const BitBoard, allocator: std.mem.Allocator, limits: SearchLimits) !?[]u8 {
+    var budget = BudgetAllocator{ .child = allocator, .limit = limits.memory_bytes };
+    // The wrapper adds no allocation headers. The returned path can be freed
+    // directly through the caller's allocator after the search wrapper expires.
+    return search(grid, initial_player, initial_boxes, budget.allocator(), limits) catch |err| {
+        if (err == error.OutOfMemory and budget.denied) return error.MemoryLimitReached;
+        return err;
+    };
+}
+
+fn search(grid: *const Grid, initial_player: Pos, initial_boxes: *const BitBoard, allocator: std.mem.Allocator, limits: SearchLimits) !?[]u8 {
     if (bbCount(initial_boxes) != grid.target_count) return error.InvalidBoxCount;
     if (isSolved(initial_boxes, grid)) {
         return try allocator.alloc(u8, 0);
@@ -547,10 +616,11 @@ fn solve(grid: *const Grid, initial_player: Pos, initial_boxes: *const BitBoard,
     var visited = StateMap.init(allocator);
     defer visited.deinit();
 
+    const h0 = grid.heuristic(initial_boxes) orelse return null;
+    if (limits.max_stored == 0) return error.StoredStateLimitReached;
     const norm0 = normalizePlayer(initial_player, initial_boxes, grid);
     try visited.put(.{ .player = norm0, .boxes = initial_boxes.* }, 0);
 
-    const h0 = grid.heuristic(initial_boxes) orelse return null;
     try nodes.append(.{
         .player = initial_player,
         .boxes = initial_boxes.*,
@@ -585,15 +655,12 @@ fn solve(grid: *const Grid, initial_player: Pos, initial_boxes: *const BitBoard,
             return try reconstructFullPath(grid, &nodes, node_idx, initial_player, allocator);
         }
 
+        if (expanded >= limits.max_expanded) return error.ExpansionLimitReached;
         expanded += 1;
         if (expanded % 100_000 == 0) {
             writeStdout("  explored {d} states, queue {d}, f={d}\n", .{
                 expanded, pq.count(), item.f,
             });
-        }
-        if (expanded > MAX_STATES) {
-            writeStdout("  state limit reached ({d} states explored)\n", .{expanded});
-            return null;
         }
 
         const reachable = reachableCells(node.player, &node.boxes, grid).cells;
@@ -641,6 +708,7 @@ fn solve(grid: *const Grid, initial_player: Pos, initial_boxes: *const BitBoard,
                         if (nodes.items[old_idx].pushes <= new_g) continue;
                     }
                     const h = grid.heuristic(&new_boxes) orelse continue;
+                    if (nodes.items.len >= limits.max_stored) return error.StoredStateLimitReached;
                     const gop = try visited.getOrPut(new_state);
                     const new_idx: u32 = @intCast(nodes.items.len);
                     gop.value_ptr.* = new_idx;
@@ -752,12 +820,29 @@ fn writeStdout(comptime fmt: []const u8, fmtargs: anytype) void {
     std.debug.print(fmt, fmtargs);
 }
 
+fn parseSearchLimits(args: []const [:0]const u8) !SearchLimits {
+    var limits: SearchLimits = .{};
+    var i: usize = 0;
+    while (i < args.len) : (i += 2) {
+        if (i + 1 == args.len) return error.MissingLimitValue;
+        const value = std.fmt.parseInt(u32, args[i + 1], 10) catch return error.InvalidLimitValue;
+        if (std.mem.eql(u8, args[i], "--max-expanded")) {
+            limits.max_expanded = value;
+        } else if (std.mem.eql(u8, args[i], "--max-stored")) {
+            limits.max_stored = value;
+        } else if (std.mem.eql(u8, args[i], "--memory-mib")) {
+            limits.memory_bytes = std.math.mul(usize, value, 1024 * 1024) catch return error.InvalidLimitValue;
+        } else return error.UnknownOption;
+    }
+    return limits;
+}
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     if (args.len < 2) {
-        writeStdout("Usage: sokoban <maze_number>\n", .{});
+        writeStdout("Usage: sokoban-solver <maze_number> [--max-expanded N] [--max-stored N] [--memory-mib N]\n", .{});
         std.process.exit(1);
     }
 
@@ -766,6 +851,10 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     };
 
+    const limits = parseSearchLimits(args[2..]) catch |err| {
+        writeStdout("Invalid search limits: {}\n", .{err});
+        std.process.exit(1);
+    };
     const map_data = @embedFile("sokoban-maps-60.txt");
 
     const parsed = parseMap(map_data, maze_num) catch |err| {
@@ -779,7 +868,13 @@ pub fn main(init: std.process.Init) !void {
 
     writeStdout("Solving...\n", .{});
 
-    const solution = try solve(&parsed.grid, parsed.player, &parsed.boxes, allocator);
+    const solution = solveWithLimits(&parsed.grid, parsed.player, &parsed.boxes, allocator, limits) catch |err| switch (err) {
+        error.ExpansionLimitReached, error.StoredStateLimitReached, error.MemoryLimitReached => {
+            writeStdout("Search limit reached: {}. Solvability is unknown.\n", .{err});
+            std.process.exit(2);
+        },
+        else => return err,
+    };
 
     if (solution) |path| {
         defer allocator.free(path);
@@ -1125,4 +1220,61 @@ test "deadlock pruning preserves solutions on boards with internal walls" {
             try std.testing.expectEqual(@as(?u32, null), expected);
         }
     }
+}
+
+test "search limits report exhaustion separately from unsolvability" {
+    const parsed = try parseMap(@embedFile("sokoban-maps-60.txt"), 0);
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.ExpansionLimitReached, solveWithLimits(&parsed.grid, parsed.player, &parsed.boxes, allocator, .{ .max_expanded = 0 }));
+    try std.testing.expectError(error.StoredStateLimitReached, solveWithLimits(&parsed.grid, parsed.player, &parsed.boxes, allocator, .{ .max_stored = 1 }));
+    try std.testing.expectError(error.MemoryLimitReached, solveWithLimits(&parsed.grid, parsed.player, &parsed.boxes, allocator, .{ .memory_bytes = 0 }));
+    // Exactly one expansion and two stored nodes suffice; popping the goal
+    // requires no further expansion even when the expansion budget is spent.
+    const corridor = try parseMap("Maze: 0\n\nXXXXX\nX@*.X\nXXXXX\n", 0);
+    const path = (try solveWithLimits(&corridor.grid, corridor.player, &corridor.boxes, allocator, .{ .max_expanded = 1, .max_stored = 2 })).?;
+    defer allocator.free(path);
+    try verifyPath(&corridor.grid, corridor.player, &corridor.boxes, path);
+    const dead = try parseMap("Maze: 0\n\nXXXXX\nX*@ X\nX . X\nXXXXX\n", 0);
+    try std.testing.expectEqual(@as(?[]u8, null), try solveWithLimits(&dead.grid, dead.player, &dead.boxes, allocator, .{ .max_expanded = 0, .max_stored = 0, .memory_bytes = 0 }));
+}
+
+fn allocationFailureSearch(allocator: std.mem.Allocator) !void {
+    const parsed = try parseMap(@embedFile("sokoban-maps-60.txt"), 0);
+    const path = (try solve(&parsed.grid, parsed.player, &parsed.boxes, allocator)).?;
+    defer allocator.free(path);
+    try verifyPath(&parsed.grid, parsed.player, &parsed.boxes, path);
+}
+
+test "search releases memory at every allocation failure point" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationFailureSearch, .{});
+}
+
+test "allocation budget accounts for growth shrink and frees" {
+    var storage: [64]u8 = undefined;
+    var backing = std.heap.FixedBufferAllocator.init(&storage);
+    var budget = BudgetAllocator{ .child = backing.allocator(), .limit = 16 };
+    const allocator = budget.allocator();
+    var memory = try allocator.alloc(u8, 8);
+    try std.testing.expectEqual(@as(usize, 8), budget.used);
+    memory = try allocator.realloc(memory, 16);
+    try std.testing.expectEqual(@as(usize, 16), budget.used);
+    try std.testing.expectError(error.OutOfMemory, allocator.realloc(memory, 17));
+    try std.testing.expectEqual(@as(usize, 16), budget.used);
+    memory = try allocator.realloc(memory, 4);
+    try std.testing.expectEqual(@as(usize, 4), budget.used);
+    const other = try allocator.alloc(u8, 12);
+    try std.testing.expectError(error.OutOfMemory, allocator.alloc(u8, 1));
+    allocator.free(other);
+    allocator.free(memory);
+    try std.testing.expectEqual(@as(usize, 0), budget.used);
+}
+
+test "parse search limit options" {
+    const limits = try parseSearchLimits(&.{ "--max-expanded", "42", "--max-stored", "99", "--memory-mib", "8" });
+    try std.testing.expectEqual(@as(u32, 42), limits.max_expanded);
+    try std.testing.expectEqual(@as(u32, 99), limits.max_stored);
+    try std.testing.expectEqual(@as(usize, 8 * 1024 * 1024), limits.memory_bytes);
+    try std.testing.expectError(error.UnknownOption, parseSearchLimits(&.{ "--unknown", "1" }));
+    try std.testing.expectError(error.MissingLimitValue, parseSearchLimits(&.{"--max-stored"}));
+    try std.testing.expectError(error.InvalidLimitValue, parseSearchLimits(&.{ "--max-stored", "-1" }));
 }
