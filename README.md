@@ -34,8 +34,10 @@ Open http://127.0.0.1:8000/ (or run `just serve`). The browser fetches
 The static site consists of `index.html`, `script.js`, `solver.wasm`, and the map
 file, all emitted into `zig-out/web`. Serve that directory over HTTP; opening the
 HTML as a `file://` URL will not work with module workers and fetch. Serving the
-repository root also works after `zig build web`: the source page falls back to
-`zig-out/web/solver.wasm` when no adjacent WASM file exists. No application
+repository root also works: `just wasm` and `zig build web` refresh the root
+`solver.wasm` as well as the copy in `zig-out/web`. For GitHub Pages, publish
+`main` → `/ (root)` and commit the updated `solver.wasm` with source changes.
+The root `.nojekyll` file disables Jekyll processing. No application
 server, JavaScript framework, or external assets are required. The worker uses
 no time limit or state-count caps: Stop controls cancellation. It uses a fixed
 4095 MiB memory limit, shown beside Solve. This caps both live search allocations

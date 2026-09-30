@@ -67,9 +67,13 @@ pub fn build(b: *std.Build) void {
     wasm.max_memory = 4095 * 1024 * 1024;
     const wasm_step = b.step("wasm", "Build the WebAssembly solver");
     wasm_step.dependOn(&b.addInstallFile(wasm.getEmittedBin(), "web/solver.wasm").step);
+    // Keep the checked-in binary current for GitHub Pages serving main's root.
+    const root_wasm = b.addUpdateSourceFiles();
+    root_wasm.addCopyFileToSource(wasm.getEmittedBin(), "solver.wasm");
+    wasm_step.dependOn(&root_wasm.step);
     const web = b.step("web", "Build the static browser visualizer and WebAssembly solver");
     web.dependOn(wasm_step);
-    for ([_][]const u8{ "index.html", "script.js", "sokoban-maps-60.txt" }) |asset| {
+    for ([_][]const u8{ "index.html", "script.js", "sokoban-maps-60.txt", ".nojekyll" }) |asset| {
         web.dependOn(&b.addInstallFile(b.path(asset), b.fmt("web/{s}", .{asset})).step);
     }
 
