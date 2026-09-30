@@ -16,7 +16,7 @@ zig build
 zig build run -- <maze_number>
 ```
 
-The maze number corresponds to the "Maze: N" entries in `sokoban-maps-60.txt` (0-60).
+The maze number corresponds to the "Maze: N" entries in `sokoban-maps-60.txt` (0-60). All bundled maps fit the supported limits of 30×22 cells and 40 boxes. Oversized maps and invalid player/box counts are rejected.
 
 ### Example
 

@@ -40,7 +40,7 @@ const dirs = [_]Dir{ .up, .down, .left, .right };
 const MAX_W = 30;
 const MAX_H = 22;
 const MAX_CELLS = MAX_W * MAX_H;
-const MAX_BOXES = 24;
+const MAX_BOXES = 40;
 
 const Pos = packed struct {
     row: u8,
@@ -365,12 +365,14 @@ fn parseMap(data: []const u8, maze_num: u32) !struct { grid: Grid, player: Pos, 
 
     var player: Pos = .{ .row = 0, .col = 0 };
     var boxes = bbEmpty();
+    var player_found = false;
 
     var row: u8 = 0;
     while (lines.next()) |line| {
         const cleaned = if (line.len > 0 and line[line.len - 1] == '\r') line[0 .. line.len - 1] else line;
         if (cleaned.len == 0) break;
         if (std.mem.startsWith(u8, cleaned, "***")) break;
+        if (row >= MAX_H or cleaned.len > MAX_W) return error.MapTooLarge;
 
         for (cleaned, 0..) |ch, ci| {
             const col: u8 = @intCast(ci);
@@ -378,6 +380,8 @@ fn parseMap(data: []const u8, maze_num: u32) !struct { grid: Grid, player: Pos, 
             switch (ch) {
                 'X' => grid.cells[row][col] = .wall,
                 '@' => {
+                    if (player_found) return error.MultiplePlayers;
+                    player_found = true;
                     grid.cells[row][col] = .empty;
                     player = pos;
                 },
@@ -386,11 +390,13 @@ fn parseMap(data: []const u8, maze_num: u32) !struct { grid: Grid, player: Pos, 
                     bbSet(&boxes, pos.idx());
                 },
                 '.' => {
+                    if (grid.target_count >= MAX_BOXES) return error.TooManyTargets;
                     grid.cells[row][col] = .target;
                     grid.targets[grid.target_count] = pos;
                     grid.target_count += 1;
                 },
                 '&' => {
+                    if (grid.target_count >= MAX_BOXES) return error.TooManyTargets;
                     grid.cells[row][col] = .target;
                     grid.targets[grid.target_count] = pos;
                     grid.target_count += 1;
@@ -403,6 +409,9 @@ fn parseMap(data: []const u8, maze_num: u32) !struct { grid: Grid, player: Pos, 
         row += 1;
     }
     grid.height = row;
+    if (!player_found) return error.MissingPlayer;
+    if (bbCount(&boxes) > MAX_BOXES) return error.TooManyBoxes;
+    if (bbCount(&boxes) != grid.target_count) return error.InvalidBoxCount;
     grid.computeDeadCells();
     grid.computeTargetDistances();
 
@@ -925,7 +934,7 @@ fn referencePushCount(grid: *const Grid, player: Pos, boxes: BitBoard) !?u32 {
 }
 
 test "A star matches unpruned Dijkstra on small two-box boards" {
-    const data = "Maze: 0\n\nXXXXX\nX @ X\nX   X\nX. .X\nXXXXX\n";
+    const data = "Maze: 0\n\nXXXXX\nX*@*X\nX   X\nX. .X\nXXXXX\n";
     const parsed = try parseMap(data, 0);
     for (0..9) |a| {
         for (a + 1..9) |b| {
@@ -1012,10 +1021,10 @@ test "large matching preserves unique targets and detects assignment deadlocks" 
     for (0..MAX_BOXES) |i| {
         for (0..MAX_BOXES) |j| cost[i][j] = if (i == j) 60000 else UNREACHABLE;
     }
-    try std.testing.expectEqual(@as(?u32, 24 * 60000), assignmentHungarian(&cost, MAX_BOXES));
+    try std.testing.expectEqual(@as(?u32, MAX_BOXES * 60000), assignmentHungarian(&cost, MAX_BOXES));
     // Every box individually has a target, but two need the same target.
-    cost[23][23] = UNREACHABLE;
-    cost[23][22] = 1;
+    cost[MAX_BOXES - 1][MAX_BOXES - 1] = UNREACHABLE;
+    cost[MAX_BOXES - 1][MAX_BOXES - 2] = 1;
     try std.testing.expectEqual(@as(?u32, null), assignmentHungarian(&cost, MAX_BOXES));
 }
 
@@ -1028,4 +1037,22 @@ test "heuristic uses distinct targets beyond sixteen boxes" {
         for (0..17) |j| grid.target_dist[i][j] = if (i == 0) 0 else 1;
     }
     try std.testing.expectEqual(@as(?u32, 16), grid.heuristic(&boxes));
+}
+
+test "all bundled mazes fit validated board and box capacities" {
+    for (0..61) |maze| {
+        const parsed = try parseMap(@embedFile("sokoban-maps-60.txt"), @intCast(maze));
+        try std.testing.expectEqual(bbCount(&parsed.boxes), parsed.grid.target_count);
+        try std.testing.expect(parsed.grid.heuristic(&parsed.boxes) != null);
+    }
+}
+
+test "parser rejects oversized and malformed maps" {
+    try std.testing.expectError(error.MapTooLarge, parseMap("Maze: 0\n\n" ++ "X" ** (MAX_W + 1) ++ "\n", 0));
+    try std.testing.expectError(error.MapTooLarge, parseMap("Maze: 0\n\n" ++ "X\n" ** (MAX_H + 1), 0));
+    try std.testing.expectError(error.MissingPlayer, parseMap("Maze: 0\n\nXXX\nX X\nXXX\n", 0));
+    try std.testing.expectError(error.MultiplePlayers, parseMap("Maze: 0\n\n@@\n", 0));
+    try std.testing.expectError(error.InvalidBoxCount, parseMap("Maze: 0\n\n@*\n", 0));
+    try std.testing.expectError(error.TooManyTargets, parseMap("Maze: 0\n\n" ++ "..........\n" ** 5, 0));
+    try std.testing.expectError(error.TooManyBoxes, parseMap("Maze: 0\n\n@\n" ++ "X**********\n" ** 5, 0));
 }
