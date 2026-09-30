@@ -1,8 +1,10 @@
 # Sokoban Solver
 
-A Sokoban puzzle solver written in Zig 0.15. Reads mazes from a bundled map file and outputs a complete player movement sequence to solve the puzzle.
+A Sokoban puzzle solver written in Zig 0.16. Reads mazes from a bundled map file and outputs a complete player movement sequence to solve the puzzle.
 
 ## Building
+
+Requires Zig 0.16.0.
 
 ```sh
 zig build

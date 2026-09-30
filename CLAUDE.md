@@ -2,7 +2,7 @@
 
 ## Project overview
 
-Zig 0.15 Sokoban puzzle solver. Single-file implementation in `main.zig`.
+Zig 0.16 Sokoban puzzle solver. Single-file implementation in `main.zig`.
 
 ## Build & run
 
@@ -27,12 +27,14 @@ Encoding: `X` wall, `@` player, `*` box (off target), `.` target, `&` box on tar
 - **Player normalization**: Flood-fill reachable area, pick minimum position. Deduplicates states where player is in same reachable region.
 - **Output**: Lowercase `udlr` = walk steps, uppercase `UDLR` = push steps. Full path verified by `verifyPath`.
 
-## Zig 0.15 API notes
+## Zig 0.16 API notes
 
 - `std.ArrayList(T)` is now unmanaged (no allocator stored). Use `std.array_list.Managed(T)` for managed version.
-- `std.io.getStdOut()` removed. Use `std.debug.print` for stderr output or construct `std.fs.File` from `std.posix.STDOUT_FILENO`.
-- `File.writer()` requires a buffer argument. Writer methods accessed via `.interface` field.
+- `main` accepts `std.process.Init`. Use `init.gpa` for temporary allocations and `init.arena.allocator()` for process-lifetime allocations.
+- Read command-line arguments with `init.minimal.args.toSlice(init.arena.allocator())`.
+- `std.debug.print` writes to stderr. For stdout, use `std.Io.File.Writer.init(.stdout(), init.io, &buffer)`, access `.interface`, and flush after writing.
 - `std.AutoHashMap` is still managed (stores allocator).
+- `std.PriorityQueue` is unmanaged: use `initContext`, pass an allocator to `push` and `deinit`, and remove items with `pop`.
 
 ## Performance
 

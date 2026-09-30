@@ -18,11 +18,21 @@ const Dir = enum(u2) {
     }
 
     fn pushLabel(self: Dir) u8 {
-        return switch (self) { .up => 'U', .down => 'D', .left => 'L', .right => 'R' };
+        return switch (self) {
+            .up => 'U',
+            .down => 'D',
+            .left => 'L',
+            .right => 'R',
+        };
     }
 
     fn walkLabel(self: Dir) u8 {
-        return switch (self) { .up => 'u', .down => 'd', .left => 'l', .right => 'r' };
+        return switch (self) {
+            .up => 'u',
+            .down => 'd',
+            .left => 'l',
+            .right => 'r',
+        };
     }
 };
 const dirs = [_]Dir{ .up, .down, .left, .right };
@@ -440,13 +450,13 @@ fn solve(grid: *const Grid, initial_player: Pos, initial_boxes: *const BitBoard,
         fn lessThan(_: void, a: QItem, b: QItem) std.math.Order {
             return std.math.order(a.f, b.f);
         }
-    }.lessThan).init(allocator, {});
-    defer pq.deinit();
-    try pq.add(.{ .idx = 0, .f = h0 });
+    }.lessThan).initContext({});
+    defer pq.deinit(allocator);
+    try pq.push(allocator, .{ .idx = 0, .f = h0 });
 
     var expanded: u32 = 0;
 
-    while (pq.removeOrNull()) |item| {
+    while (pq.pop()) |item| {
         const node_idx = item.idx;
         const node = nodes.items[node_idx];
         const g = node.pushes;
@@ -536,7 +546,7 @@ fn solve(grid: *const Grid, initial_player: Pos, initial_boxes: *const BitBoard,
                     }
 
                     const h = grid.heuristic(&new_boxes);
-                    try pq.add(.{ .idx = new_idx, .f = @as(u32, new_g) + h });
+                    try pq.push(allocator, .{ .idx = new_idx, .f = @as(u32, new_g) + h });
                 }
             }
         }
@@ -632,13 +642,9 @@ fn writeStdout(comptime fmt: []const u8, fmtargs: anytype) void {
     std.debug.print(fmt, fmtargs);
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     if (args.len < 2) {
         writeStdout("Usage: sokoban <maze_number>\n", .{});
