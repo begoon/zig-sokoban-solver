@@ -23,8 +23,8 @@ Encoding: `X` wall, `@` player, `*` box (off target), `.` target, `&` box on tar
 - **State representation**: Player position (`Pos`) + box positions (`BitBoard` - array of u64 bitmask over grid cells).
 - **Search**: A* with priority queue. Full states keyed by normalized player + box bitboard, with hash collisions resolved by equality. Track best paths, reopen cheaper states, and skip stale queue entries. Equal f scores prefer deeper states.
 - **Heuristic**: Exact box-to-target assignment: bitmask DP up to 8 boxes, O(n³) Hungarian above that. Infeasible matchings are pruned.
-- **Deadlock pruning**: Dead cell detection (reverse BFS from targets), assignment infeasibility, 2x2 freeze deadlock.
-- **Player normalization**: Flood-fill reachable area, pick minimum position. Deduplicates states where player is in same reachable region.
+- **Deadlock pruning**: Dead cell detection (reverse BFS from targets), assignment infeasibility, 2x2 freeze deadlock, conservative immovable-group detection.
+- **Player normalization**: Bitboard flood-fill over precomputed neighbors, pick minimum cell index. Deduplicates states where player is in same reachable region.
 - **Output**: Lowercase `udlr` = walk steps, uppercase `UDLR` = push steps. Full path verified by `verifyPath`.
 
 ## Zig 0.16 API notes

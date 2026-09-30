@@ -106,6 +106,7 @@ const Grid = struct {
     width: u8,
     height: u8,
     dead_cell: [MAX_CELLS]bool,
+    neighbors: [MAX_CELLS][4]u16,
     // BFS distance from each target to every cell (ignoring boxes, just walls)
     target_dist: [MAX_BOXES][MAX_CELLS]u16,
 
@@ -117,6 +118,49 @@ const Grid = struct {
     fn isTarget(self: *const Grid, p: Pos) bool {
         if (p.row >= self.height or p.col >= self.width) return false;
         return self.cells[p.row][p.col] == .target;
+    }
+
+    fn computeNeighbors(self: *Grid) void {
+        for (0..MAX_CELLS) |i| {
+            const p = Pos{ .row = @intCast(i / MAX_W), .col = @intCast(i % MAX_W) };
+            self.neighbors[i] = .{UNREACHABLE} ** 4;
+            if (self.isWall(p)) continue;
+            for (dirs, 0..) |dir, di| {
+                const next = p.move(dir) orelse continue;
+                if (!self.isWall(next)) self.neighbors[i][di] = next.idx();
+            }
+        }
+    }
+
+    // Remove any box that could move if all previously removed boxes vanished.
+    // Boxes left at the fixed point cannot make even a first move. Ignoring
+    // player access makes this conservative: it can miss deadlocks, not invent them.
+    fn hasFrozenGroup(self: *const Grid, boxes: *const BitBoard) bool {
+        var frozen = boxes.*;
+        var changed = true;
+        while (changed) {
+            changed = false;
+            for (frozen, 0..) |value, wi| {
+                var word = value;
+                while (word != 0) {
+                    const bit = @ctz(word);
+                    word &= word - 1;
+                    const cell: u16 = @intCast(wi * 64 + bit);
+                    const adjacent = self.neighbors[cell];
+                    for ([_][2]usize{ .{ 0, 1 }, .{ 2, 3 } }) |axis| {
+                        const a = adjacent[axis[0]];
+                        const b = adjacent[axis[1]];
+                        if (a != UNREACHABLE and b != UNREACHABLE and !bbTest(&frozen, a) and !bbTest(&frozen, b)) {
+                            bbClear(&frozen, cell);
+                            changed = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        for (self.targets[0..self.target_count]) |target| bbClear(&frozen, target.idx());
+        return bbCount(&frozen) != 0;
     }
 
     fn computeDeadCells(self: *Grid) void {
@@ -412,6 +456,7 @@ fn parseMap(data: []const u8, maze_num: u32) !struct { grid: Grid, player: Pos, 
     if (!player_found) return error.MissingPlayer;
     if (bbCount(&boxes) > MAX_BOXES) return error.TooManyBoxes;
     if (bbCount(&boxes) != grid.target_count) return error.InvalidBoxCount;
+    grid.computeNeighbors();
     grid.computeDeadCells();
     grid.computeTargetDistances();
 
@@ -425,31 +470,32 @@ fn isSolved(boxes: *const BitBoard, grid: *const Grid) bool {
     return true;
 }
 
-fn normalizePlayer(player: Pos, boxes: *const BitBoard, grid: *const Grid) Pos {
-    var visited: [MAX_CELLS]bool = .{false} ** MAX_CELLS;
-    var queue: [MAX_CELLS]Pos = undefined;
-    var head: u16 = 0;
-    var tail: u16 = 0;
-    queue[tail] = player;
-    tail += 1;
-    visited[player.idx()] = true;
-    var min_pos = player;
+const Reachable = struct { cells: BitBoard, canonical: Pos };
 
-    while (head < tail) {
+fn reachableCells(player: Pos, boxes: *const BitBoard, grid: *const Grid) Reachable {
+    var cells = bbEmpty();
+    var queue: [MAX_CELLS]u16 = undefined;
+    var head: usize = 0;
+    var tail: usize = 1;
+    const start = player.idx();
+    queue[0] = start;
+    bbSet(&cells, start);
+    var minimum = start;
+    while (head < tail) : (head += 1) {
         const cur = queue[head];
-        head += 1;
-        if (@as(u16, @bitCast(cur)) < @as(u16, @bitCast(min_pos))) min_pos = cur;
-        for (dirs) |dir| {
-            if (cur.move(dir)) |np| {
-                if (!visited[np.idx()] and !grid.isWall(np) and !bbTest(boxes, np.idx())) {
-                    visited[np.idx()] = true;
-                    queue[tail] = np;
-                    tail += 1;
-                }
-            }
+        minimum = @min(minimum, cur);
+        for (grid.neighbors[cur]) |next| {
+            if (next == UNREACHABLE or bbTest(&cells, next) or bbTest(boxes, next)) continue;
+            bbSet(&cells, next);
+            queue[tail] = next;
+            tail += 1;
         }
     }
-    return min_pos;
+    return .{ .cells = cells, .canonical = .{ .row = @intCast(minimum / MAX_W), .col = @intCast(minimum % MAX_W) } };
+}
+
+fn normalizePlayer(player: Pos, boxes: *const BitBoard, grid: *const Grid) Pos {
+    return reachableCells(player, boxes, grid).canonical;
 }
 
 const State = struct {
@@ -550,29 +596,7 @@ fn solve(grid: *const Grid, initial_player: Pos, initial_boxes: *const BitBoard,
             return null;
         }
 
-        // Flood fill reachable cells
-        var reachable: [MAX_CELLS]bool = .{false} ** MAX_CELLS;
-        {
-            var queue: [MAX_CELLS]Pos = undefined;
-            var qh: u16 = 0;
-            var qt: u16 = 0;
-            queue[qt] = node.player;
-            qt += 1;
-            reachable[node.player.idx()] = true;
-            while (qh < qt) {
-                const cur = queue[qh];
-                qh += 1;
-                for (dirs) |dir| {
-                    if (cur.move(dir)) |np| {
-                        if (!reachable[np.idx()] and !grid.isWall(np) and !bbTest(&node.boxes, np.idx())) {
-                            reachable[np.idx()] = true;
-                            queue[qt] = np;
-                            qt += 1;
-                        }
-                    }
-                }
-            }
-        }
+        const reachable = reachableCells(node.player, &node.boxes, grid).cells;
 
         // Iterate only over actual box positions
         const box_iter = node.boxes;
@@ -590,7 +614,7 @@ fn solve(grid: *const Grid, initial_player: Pos, initial_boxes: *const BitBoard,
                     const pc = @as(i16, box_pos.col) - d[1];
                     if (pr < 0 or pc < 0 or pr >= MAX_H or pc >= MAX_W) continue;
                     const player_pos = Pos{ .row = @intCast(pr), .col = @intCast(pc) };
-                    if (!reachable[player_pos.idx()]) continue;
+                    if (!bbTest(&reachable, player_pos.idx())) continue;
 
                     const new_box = box_pos.move(push_dir) orelse continue;
                     if (grid.isWall(new_box)) continue;
@@ -602,6 +626,13 @@ fn solve(grid: *const Grid, initial_player: Pos, initial_boxes: *const BitBoard,
                     bbSet(&new_boxes, new_box.idx());
 
                     if (grid.hasFreezeDeadlock(&new_boxes, new_box)) continue;
+                    // A new group freeze needs contact with another box; the
+                    // static dead-cell table already handles isolated boxes.
+                    var touches_box = false;
+                    for (grid.neighbors[new_box.idx()]) |neighbor| {
+                        if (neighbor != UNREACHABLE and bbTest(&new_boxes, neighbor)) touches_box = true;
+                    }
+                    if (touches_box and grid.hasFrozenGroup(&new_boxes)) continue;
 
                     const new_norm = normalizePlayer(box_pos, &new_boxes, grid);
                     const new_state = State{ .player = new_norm, .boxes = new_boxes };
@@ -717,6 +748,7 @@ fn findWalkPath(from: Pos, to: Pos, grid: *const Grid, boxes: *const BitBoard, a
 }
 
 fn writeStdout(comptime fmt: []const u8, fmtargs: anytype) void {
+    if (@import("builtin").is_test) return;
     std.debug.print(fmt, fmtargs);
 }
 
@@ -1055,4 +1087,42 @@ test "parser rejects oversized and malformed maps" {
     try std.testing.expectError(error.InvalidBoxCount, parseMap("Maze: 0\n\n@*\n", 0));
     try std.testing.expectError(error.TooManyTargets, parseMap("Maze: 0\n\n" ++ "..........\n" ** 5, 0));
     try std.testing.expectError(error.TooManyBoxes, parseMap("Maze: 0\n\n@\n" ++ "X**********\n" ** 5, 0));
+}
+
+test "deadlock pruning preserves solutions on boards with internal walls" {
+    var random = std.Random.DefaultPrng.init(1234);
+    const base = try parseMap("Maze: 0\n\nXXXXXX\nX@   X\nX    X\nX    X\nX    X\nXXXXXX\n", 0);
+    for (0..96) |iteration| {
+        var grid = base.grid;
+        var positions: [16]Pos = undefined;
+        for (&positions, 0..) |*p, i| p.* = .{ .row = @intCast(1 + i / 4), .col = @intCast(1 + i % 4) };
+        random.random().shuffle(Pos, &positions);
+        const n = 2 + iteration % 2;
+        var boxes = bbEmpty();
+        for (positions[1..][0..n]) |p| bbSet(&boxes, p.idx());
+        grid.target_count = @intCast(n);
+        for (positions[1 + n ..][0..n], 0..) |p, i| {
+            grid.targets[i] = p;
+            grid.cells[p.row][p.col] = .target;
+        }
+        for (positions[1 + 2 * n ..]) |p| {
+            if (random.random().intRangeLessThan(u8, 0, 4) == 0) grid.cells[p.row][p.col] = .wall;
+        }
+        grid.computeNeighbors();
+        grid.computeDeadCells();
+        grid.computeTargetDistances();
+        const expected = try referencePushCount(&grid, positions[0], boxes);
+        if (expected) |pushes| {
+            try std.testing.expect(grid.heuristic(&boxes).? <= pushes);
+            try std.testing.expect(!grid.hasFrozenGroup(&boxes));
+        }
+        const path = try solve(&grid, positions[0], &boxes, std.testing.allocator);
+        if (path) |p| {
+            defer std.testing.allocator.free(p);
+            try verifyPath(&grid, positions[0], &boxes, p);
+            try std.testing.expectEqual(expected, @as(?u32, @intCast(countPushes(p))));
+        } else {
+            try std.testing.expectEqual(@as(?u32, null), expected);
+        }
+    }
 }

@@ -67,12 +67,12 @@ Directions: **U**p, **D**own, **L**eft, **R**ight.
 The solver uses **A\* search** over the push state space, minimizing pushes rather than total player steps:
 
 1. **State**: (normalized player position, set of box positions). Hash collisions are resolved by comparing the complete state. The best known push count is tracked; cheaper paths reopen states, and stale queue entries are skipped. Equal `f` scores prefer deeper states, with insertion order as a deterministic final tie-break.
-2. **Player normalization**: Two states with the same box layout where the player is in the same reachable region are treated as identical. This is computed via flood-fill, picking the lexicographically smallest reachable cell.
+2. **Player normalization**: Two states with the same box layout where the player is in the same reachable region are treated as identical. This is computed via a bitboard flood-fill over precomputed floor neighbors, picking the smallest reachable cell index.
 3. **Heuristic**: Minimum-weight bipartite matching of boxes to targets. Up to 8 boxes use bitmask DP; larger puzzles use the `O(n³)` Hungarian algorithm. Both give an exact assignment cost and an admissible lower bound on remaining pushes.
 4. **Deadlock pruning**:
    - **Dead cells**: Precomputed via reverse BFS from targets. A cell is "dead" if a single box placed there can never reach any target through any sequence of pushes.
    - **Assignment deadlock**: Prunes states with no complete assignment of boxes to distinct reachable targets.
-   - **Freeze deadlock**: Detects 2x2 blocks of walls/boxes where at least one box is not on a target (frozen and unsolvable).
+   - **Freeze deadlock**: Detects blocked 2×2 regions and immovable groups of boxes. The group check repeatedly removes boxes that could move with other removed boxes absent; any remaining off-target box proves a deadlock.
 5. **Path reconstruction**: After finding the push sequence, the solver reconstructs the full player path by BFS-pathing between consecutive push positions.
 
 ## Performance
