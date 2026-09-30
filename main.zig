@@ -236,63 +236,105 @@ const Grid = struct {
         return false;
     }
 
-    /// Admissible heuristic: optimal assignment of boxes to targets using bitmask DP.
-    /// O(n * 2^n) where n = number of boxes. Fine for n ≤ 20.
-    fn heuristic(self: *const Grid, boxes: *const BitBoard) u32 {
-        // Collect box positions
-        var box_cells: [MAX_BOXES]u16 = undefined;
-        var n: u8 = 0;
-        for (0..MAX_CELLS) |i| {
-            if (bbTest(boxes, @intCast(i))) {
-                box_cells[n] = @intCast(i);
+    /// Exact box-to-target assignment in the relaxed single-box push graph.
+    /// An impossible matching proves a deadlock, even when every individual
+    /// box can reach some target. Small boards use DP; larger ones Hungarian.
+    fn heuristic(self: *const Grid, boxes: *const BitBoard) ?u32 {
+        var cost: AssignmentCosts = undefined;
+        var n: usize = 0;
+        for (boxes, 0..) |word_value, wi| {
+            var word = word_value;
+            while (word != 0) {
+                const bit = @ctz(word);
+                word &= word - 1;
+                const cell = wi * 64 + bit;
+                for (0..self.target_count) |ti| cost[n][ti] = self.target_dist[ti][cell];
                 n += 1;
             }
         }
-        if (n == 0) return 0;
-
-        // cost[bi][ti] = push distance from box bi to target ti
-        var cost: [MAX_BOXES][MAX_BOXES]u16 = undefined;
-        for (0..n) |bi| {
-            for (0..self.target_count) |ti| {
-                cost[bi][ti] = self.target_dist[ti][box_cells[bi]];
-            }
-        }
-
-        // For large n, fall back to sum of individual minimums
-        if (n > 16) {
-            var total: u32 = 0;
-            for (0..n) |bi| {
-                var best: u32 = 0xFFFF;
-                for (0..self.target_count) |ti| {
-                    if (cost[bi][ti] < best) best = cost[bi][ti];
-                }
-                total += if (best >= 0xFFFF) 100 else best;
-            }
-            return total;
-        }
-
-        // Bitmask DP: dp[mask] = min cost to assign targets in mask to first popcount(mask) boxes
-        // Max 2^16 = 65536 entries = 256KB on stack
-        const mask_count = @as(u32, 1) << @intCast(n);
-        var dp: [1 << 16]u32 = undefined;
-        dp[0] = 0;
-        for (1..mask_count) |mask| {
-            dp[mask] = 0xFFFFFF;
-            const bi: u8 = @intCast(@popCount(mask) - 1);
-            var m = mask;
-            while (m != 0) {
-                const bit: u5 = @intCast(@ctz(m));
-                const ti: u8 = @intCast(bit);
-                const prev_mask = mask & ~(@as(usize, 1) << bit);
-                const c: u32 = if (cost[bi][ti] >= 0xFFFF) 10000 else cost[bi][ti];
-                const val = dp[prev_mask] + c;
-                if (val < dp[mask]) dp[mask] = val;
-                m &= m - 1;
-            }
-        }
-        return dp[mask_count - 1];
+        std.debug.assert(n == self.target_count);
+        return if (n <= 8) assignmentDP(&cost, n) else assignmentHungarian(&cost, n);
     }
 };
+
+const AssignmentCosts = [MAX_BOXES][MAX_BOXES]u16;
+const UNREACHABLE = std.math.maxInt(u16);
+const MATCH_INF: u32 = 1 << 28;
+
+fn assignmentDP(cost: *const AssignmentCosts, n: usize) ?u32 {
+    std.debug.assert(n <= 8);
+    var dp: [1 << 8]u32 = undefined;
+    const count = @as(usize, 1) << @intCast(n);
+    dp[0] = 0;
+    for (1..count) |mask| {
+        dp[mask] = MATCH_INF;
+        const bi = @popCount(mask) - 1;
+        var remaining = mask;
+        while (remaining != 0) {
+            const ti = @ctz(remaining);
+            remaining &= remaining - 1;
+            if (cost[bi][ti] == UNREACHABLE) continue;
+            const prev = mask & ~(@as(usize, 1) << @intCast(ti));
+            dp[mask] = @min(dp[mask], dp[prev] + cost[bi][ti]);
+        }
+    }
+    return if (dp[count - 1] == MATCH_INF) null else dp[count - 1];
+}
+
+// Shortest augmenting path Hungarian algorithm, O(n^3) time and O(n) scratch.
+// Rows/columns are one-based; column zero represents the augmenting root.
+fn assignmentHungarian(cost: *const AssignmentCosts, n: usize) ?u32 {
+    var u = [_]i32{0} ** (MAX_BOXES + 1);
+    var v = [_]i32{0} ** (MAX_BOXES + 1);
+    var matched = [_]usize{0} ** (MAX_BOXES + 1);
+    var previous: [MAX_BOXES + 1]usize = undefined;
+    const inf: i32 = MATCH_INF;
+    for (1..n + 1) |row| {
+        matched[0] = row;
+        var col: usize = 0;
+        var min_cost = [_]i32{inf} ** (MAX_BOXES + 1);
+        var used = [_]bool{false} ** (MAX_BOXES + 1);
+        while (true) {
+            used[col] = true;
+            const r = matched[col];
+            var delta = inf;
+            var next: usize = 0;
+            for (1..n + 1) |j| {
+                if (used[j]) continue;
+                if (cost[r - 1][j - 1] != UNREACHABLE) {
+                    const reduced = @as(i32, cost[r - 1][j - 1]) - u[r] - v[j];
+                    if (reduced < min_cost[j]) {
+                        min_cost[j] = reduced;
+                        previous[j] = col;
+                    }
+                }
+                if (min_cost[j] < delta) {
+                    delta = min_cost[j];
+                    next = j;
+                }
+            }
+            if (delta == inf) return null;
+            for (0..n + 1) |j| {
+                if (used[j]) {
+                    u[matched[j]] += delta;
+                    v[j] -= delta;
+                } else if (min_cost[j] != inf) {
+                    min_cost[j] -= delta;
+                }
+            }
+            col = next;
+            if (matched[col] == 0) break;
+        }
+        while (col != 0) {
+            const prev = previous[col];
+            matched[col] = matched[prev];
+            col = prev;
+        }
+    }
+    var total: u32 = 0;
+    for (1..n + 1) |j| total += cost[matched[j] - 1][j - 1];
+    return total;
+}
 
 fn parseMap(data: []const u8, maze_num: u32) !struct { grid: Grid, player: Pos, boxes: BitBoard } {
     var lines = std.mem.splitScalar(u8, data, '\n');
@@ -433,6 +475,7 @@ const BfsNode = struct {
 const MAX_STATES = 5_000_000;
 
 fn solve(grid: *const Grid, initial_player: Pos, initial_boxes: *const BitBoard, allocator: std.mem.Allocator) !?[]u8 {
+    if (bbCount(initial_boxes) != grid.target_count) return error.InvalidBoxCount;
     if (isSolved(initial_boxes, grid)) {
         return try allocator.alloc(u8, 0);
     }
@@ -452,7 +495,7 @@ fn solve(grid: *const Grid, initial_player: Pos, initial_boxes: *const BitBoard,
     const norm0 = normalizePlayer(initial_player, initial_boxes, grid);
     try visited.put(.{ .player = norm0, .boxes = initial_boxes.* }, 0);
 
-    const h0 = grid.heuristic(initial_boxes);
+    const h0 = grid.heuristic(initial_boxes) orelse return null;
     try nodes.append(.{
         .player = initial_player,
         .boxes = initial_boxes.*,
@@ -554,9 +597,11 @@ fn solve(grid: *const Grid, initial_player: Pos, initial_boxes: *const BitBoard,
                     const new_norm = normalizePlayer(box_pos, &new_boxes, grid);
                     const new_state = State{ .player = new_norm, .boxes = new_boxes };
                     const new_g = g + 1;
+                    if (visited.get(new_state)) |old_idx| {
+                        if (nodes.items[old_idx].pushes <= new_g) continue;
+                    }
+                    const h = grid.heuristic(&new_boxes) orelse continue;
                     const gop = try visited.getOrPut(new_state);
-                    if (gop.found_existing and nodes.items[gop.value_ptr.*].pushes <= new_g) continue;
-
                     const new_idx: u32 = @intCast(nodes.items.len);
                     gop.value_ptr.* = new_idx;
                     try nodes.append(.{
@@ -568,7 +613,6 @@ fn solve(grid: *const Grid, initial_player: Pos, initial_boxes: *const BitBoard,
                         .pushes = new_g,
                     });
 
-                    const h = grid.heuristic(&new_boxes);
                     try pq.push(allocator, .{ .idx = new_idx, .f = new_g + h, .g = new_g });
                 }
             }
@@ -930,4 +974,58 @@ test "state equality resolves hash collisions" {
     try std.testing.expectEqual(@as(u32, 3), map.get(a).?);
     try std.testing.expectEqual(@as(u32, 7), map.get(b).?);
     try std.testing.expectEqual(@as(u32, 9), map.get(c).?);
+}
+
+fn bruteAssignment(cost: *const AssignmentCosts, n: usize, row: usize, used: u32) ?u32 {
+    if (row == n) return 0;
+    var best: ?u32 = null;
+    for (0..n) |col| {
+        const bit = @as(u32, 1) << @intCast(col);
+        if (used & bit != 0 or cost[row][col] == UNREACHABLE) continue;
+        const tail = bruteAssignment(cost, n, row + 1, used | bit) orelse continue;
+        const total = tail + cost[row][col];
+        best = if (best) |b| @min(b, total) else total;
+    }
+    return best;
+}
+
+test "assignment algorithms agree with exhaustive permutations" {
+    var random = std.Random.DefaultPrng.init(42);
+    var cost: AssignmentCosts = undefined;
+    for (0..7) |n| {
+        for (0..40) |_| {
+            for (0..n) |i| {
+                for (0..n) |j| {
+                    const value = random.random().intRangeLessThan(u16, 0, 30);
+                    cost[i][j] = if (value < 8) UNREACHABLE else value - 8;
+                }
+            }
+            const expected = bruteAssignment(&cost, n, 0, 0);
+            try std.testing.expectEqual(expected, assignmentDP(&cost, n));
+            try std.testing.expectEqual(expected, assignmentHungarian(&cost, n));
+        }
+    }
+}
+
+test "large matching preserves unique targets and detects assignment deadlocks" {
+    var cost: AssignmentCosts = undefined;
+    for (0..MAX_BOXES) |i| {
+        for (0..MAX_BOXES) |j| cost[i][j] = if (i == j) 60000 else UNREACHABLE;
+    }
+    try std.testing.expectEqual(@as(?u32, 24 * 60000), assignmentHungarian(&cost, MAX_BOXES));
+    // Every box individually has a target, but two need the same target.
+    cost[23][23] = UNREACHABLE;
+    cost[23][22] = 1;
+    try std.testing.expectEqual(@as(?u32, null), assignmentHungarian(&cost, MAX_BOXES));
+}
+
+test "heuristic uses distinct targets beyond sixteen boxes" {
+    var grid: Grid = undefined;
+    grid.target_count = 17;
+    var boxes = bbEmpty();
+    for (0..17) |i| {
+        bbSet(&boxes, @intCast(i));
+        for (0..17) |j| grid.target_dist[i][j] = if (i == 0) 0 else 1;
+    }
+    try std.testing.expectEqual(@as(?u32, 16), grid.heuristic(&boxes));
 }
