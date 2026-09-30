@@ -380,7 +380,7 @@ fn assignmentHungarian(cost: *const AssignmentCosts, n: usize) ?u32 {
     return total;
 }
 
-fn parseMap(data: []const u8, maze_num: u32) !struct { grid: Grid, player: Pos, boxes: BitBoard } {
+pub fn parseMap(data: []const u8, maze_num: u32) !struct { grid: Grid, player: Pos, boxes: BitBoard } {
     var lines = std.mem.splitScalar(u8, data, '\n');
 
     var found = false;
@@ -527,9 +527,10 @@ const BfsNode = struct {
     pushes: u32, // g-cost: number of pushes so far
 };
 
-const SearchLimits = struct {
-    max_expanded: u32 = 5_000_000,
-    max_stored: u32 = 1_000_000,
+pub const SearchLimits = struct {
+    progress: ?*const fn (expanded: u32, queued: u32) void = null,
+    max_expanded: ?u32 = 5_000_000,
+    max_stored: ?u32 = 1_000_000,
     memory_bytes: usize = 256 * 1024 * 1024,
 };
 
@@ -588,7 +589,7 @@ fn solve(grid: *const Grid, initial_player: Pos, initial_boxes: *const BitBoard,
     return solveWithLimits(grid, initial_player, initial_boxes, allocator, .{});
 }
 
-fn solveWithLimits(grid: *const Grid, initial_player: Pos, initial_boxes: *const BitBoard, allocator: std.mem.Allocator, limits: SearchLimits) !?[]u8 {
+pub fn solveWithLimits(grid: *const Grid, initial_player: Pos, initial_boxes: *const BitBoard, allocator: std.mem.Allocator, limits: SearchLimits) !?[]u8 {
     var budget = BudgetAllocator{ .child = allocator, .limit = limits.memory_bytes };
     // The wrapper adds no allocation headers. The returned path can be freed
     // directly through the caller's allocator after the search wrapper expires.
@@ -641,6 +642,7 @@ fn search(grid: *const Grid, initial_player: Pos, initial_boxes: *const BitBoard
     try pq.push(allocator, .{ .idx = 0, .f = h0, .g = 0 });
 
     var expanded: u32 = 0;
+    if (limits.progress) |report| report(0, @intCast(pq.count()));
 
     while (pq.pop()) |item| {
         const node_idx = item.idx;
@@ -651,12 +653,18 @@ fn search(grid: *const Grid, initial_player: Pos, initial_boxes: *const BitBoard
         // immutable so already-generated paths can still be reconstructed.
         if (visited.get(state).? != node_idx) continue;
         if (isSolved(&node.boxes, grid)) {
+            if (limits.progress) |report| report(expanded, @intCast(pq.count()));
             writeStdout("  solved after {d} states explored\n", .{expanded});
             return try reconstructFullPath(grid, &nodes, node_idx, initial_player, allocator);
         }
 
-        if (expanded >= limits.max_expanded) return error.ExpansionLimitReached;
+        if (limits.max_expanded) |maximum| {
+            if (expanded >= maximum) return error.ExpansionLimitReached;
+        }
         expanded += 1;
+        if (expanded % 1024 == 0) {
+            if (limits.progress) |report| report(expanded, @intCast(pq.count()));
+        }
         if (expanded % 100_000 == 0) {
             writeStdout("  explored {d} states, queue {d}, f={d}\n", .{
                 expanded, pq.count(), item.f,
@@ -708,7 +716,9 @@ fn search(grid: *const Grid, initial_player: Pos, initial_boxes: *const BitBoard
                         if (nodes.items[old_idx].pushes <= new_g) continue;
                     }
                     const h = grid.heuristic(&new_boxes) orelse continue;
-                    if (nodes.items.len >= limits.max_stored) return error.StoredStateLimitReached;
+                    if (limits.max_stored) |maximum| {
+                        if (nodes.items.len >= maximum) return error.StoredStateLimitReached;
+                    }
                     const gop = try visited.getOrPut(new_state);
                     const new_idx: u32 = @intCast(nodes.items.len);
                     gop.value_ptr.* = new_idx;
@@ -816,7 +826,7 @@ fn findWalkPath(from: Pos, to: Pos, grid: *const Grid, boxes: *const BitBoard, a
 }
 
 fn writeStdout(comptime fmt: []const u8, fmtargs: anytype) void {
-    if (@import("builtin").is_test) return;
+    if (@import("builtin").is_test or @import("builtin").os.tag == .freestanding) return;
     std.debug.print(fmt, fmtargs);
 }
 
@@ -1271,8 +1281,8 @@ test "allocation budget accounts for growth shrink and frees" {
 
 test "parse search limit options" {
     const limits = try parseSearchLimits(&.{ "--max-expanded", "42", "--max-stored", "99", "--memory-mib", "8" });
-    try std.testing.expectEqual(@as(u32, 42), limits.max_expanded);
-    try std.testing.expectEqual(@as(u32, 99), limits.max_stored);
+    try std.testing.expectEqual(@as(?u32, 42), limits.max_expanded);
+    try std.testing.expectEqual(@as(?u32, 99), limits.max_stored);
     try std.testing.expectEqual(@as(usize, 8 * 1024 * 1024), limits.memory_bytes);
     try std.testing.expectError(error.UnknownOption, parseSearchLimits(&.{ "--unknown", "1" }));
     try std.testing.expectError(error.MissingLimitValue, parseSearchLimits(&.{"--max-stored"}));

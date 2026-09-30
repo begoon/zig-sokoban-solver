@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f5f4ef">
+  <title>Sokoban visualizer</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #24353e; background: #f5f4ef; }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    .fork-corner { position: absolute; top: 0; right: 0; width: 92px; height: 92px; overflow: hidden; pointer-events: none; }
+    .fork-ribbon { position: absolute; top: 19px; right: -31px; width: 130px; padding: 4px 0; transform: rotate(45deg); background: #24353e; color: #fff; text-align: center; text-decoration: none; font-size: .875rem; font-weight: 600; line-height: 1.4; border-block: 1px dashed #91a0a8; box-shadow: 0 0 0 3px #24353e, 0 3px 7px #0003; pointer-events: auto; }
+    .fork-ribbon:hover { background: #196d62; box-shadow: 0 0 0 3px #196d62, 0 3px 7px #0003; }
+    .fork-ribbon:focus-visible { outline: 3px solid #1e8477; outline-offset: 5px; }
+    main { width: min(100% - 32px, 760px); margin: 20px auto 32px; }
+    header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+    h1 { margin: 0; font-size: clamp(1.4rem, 4vw, 1.8rem); font-weight: 650; letter-spacing: -.035em; }
+    .selector { display: flex; align-items: end; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+    label { display: block; font-size: .875rem; font-weight: 600; margin-bottom: 7px; }
+    .map-field { flex: 1; min-width: 140px; }
+    button, select, textarea { font: inherit; }
+    button, select { min-height: 42px; border: 1px solid #c6ccca; border-radius: 7px; background: #fff; color: inherit; }
+    select { width: 100%; padding: 8px 32px 8px 12px; cursor: pointer; }
+    button { padding: 8px 17px; font-size: .9rem; font-weight: 600; cursor: pointer; transition: background .12s; }
+    button:hover:not(:disabled) { background: #e8eeeb; }
+    button:disabled { cursor: default; opacity: .42; }
+    button:focus-visible, select:focus-visible, textarea:focus-visible { outline: 3px solid #1e8477; outline-offset: 3px; }
+    .arrow { width: 44px; padding: 7px; font-size: 1.25rem; }
+    .map-meta { display: flex; justify-content: space-between; gap: 10px; color: #607078; font-size: .875rem; margin-bottom: 10px; }
+    kbd { font: inherit; }
+    .board-frame { background: #e9eae4; border: 1px solid #d2d8d0; border-radius: 9px; padding: 12px; overflow: hidden; }
+    canvas { display: block; width: auto; height: auto; max-width: 100%; max-height: 42vh; aspect-ratio: 29 / 20; }
+    .legend { display: flex; flex-wrap: wrap; gap: 18px; margin: 11px 0 20px; color: #53646c; font-size: .875rem; }
+    .legend span { display: inline-flex; align-items: center; gap: 6px; }
+    .swatch { display: inline-block; width: 12px; height: 12px; border-radius: 3px; }
+    .swatch.player { background: #157f75; border-radius: 50%; }
+    .swatch.box { background: #cb9149; border: 1px solid #926431; }
+    .swatch.target { width: 11px; height: 11px; border: 2px solid #438572; border-radius: 50%; }
+    .solution-heading { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+    .hint { font-size: .875rem; color: #607078; }
+    textarea { display: block; resize: vertical; width: 100%; min-height: 74px; padding: 12px; border: 1px solid #c6ccca; border-radius: 7px; background: #fff; color: #24353e; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .9rem; line-height: 1.5; overflow-wrap: anywhere; }
+    textarea::placeholder { color: #738087; }
+    textarea:read-only { background: #f4f6f2; }
+    .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 12px; }
+    #run { background: #196d62; border-color: #196d62; color: #fff; }
+    #run:hover:not(:disabled) { background: #12564d; }
+    #solve { background: #f3e5cc; border-color: #d8bc90; }
+    #solve:hover:not(:disabled) { background: #ebd8b5; }
+    .solver-settings { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+    .status-area { margin-top: 17px; min-height: 75px; }
+    #status { margin: 0 0 6px; font-size: .9rem; }
+    #status[data-error="true"] { color: #9b392f; }
+    #metrics { display: block; color: #607078; font-size: .875rem; font-variant-numeric: tabular-nums; min-height: 1.3em; }
+    progress { display: block; width: 100%; height: 5px; margin-top: 10px; accent-color: #196d62; border: 0; }
+    progress[hidden] { display: none; }
+    noscript { display: block; padding: 20px; color: #9b392f; }
+    @media (max-width: 1040px) {
+      header { min-height: 52px; padding-right: 74px; align-items: flex-start; }
+    }
+    @media (max-width: 520px) {
+      main { width: calc(100% - 24px); margin-top: 18px; }
+      .solution-heading { display: block; margin-bottom: 8px; }
+      .solution-heading label { margin-bottom: 4px; }
+      .board-frame { padding: 6px; }
+      .keyboard-hint { display: none; }
+    }
+  </style>
+</head>
+<body>
+<div class="fork-corner">
+  <a class="fork-ribbon" href="https://github.com/begoon/zig-sokoban-solver" target="_blank" rel="noopener noreferrer">GitHub</a>
+</div>
+<main>
+  <header>
+    <div>
+      <h1>Sokoban visualizer</h1>
+    </div>
+  </header>
+  <section aria-label="Map preview">
+    <div class="selector">
+      <button id="previous" class="arrow" type="button" aria-label="Previous map" title="Previous map (left arrow)" disabled>←</button>
+      <div class="map-field">
+        <label for="map-select">Map</label>
+        <select id="map-select" disabled><option>Loading maps…</option></select>
+      </div>
+      <button id="next" class="arrow" type="button" aria-label="Next map" title="Next map (right arrow)" disabled>→</button>
+    </div>
+    <div class="map-meta">
+      <span id="map-info">Loading…</span>
+      <span class="keyboard-hint"><kbd>←</kbd> / <kbd>→</kbd> to change maps</span>
+    </div>
+    <div class="board-frame">
+      <canvas id="board" width="928" height="640" role="img" aria-label="Map preview loading"></canvas>
+    </div>
+    <div class="legend" aria-label="Map legend">
+      <span><i class="swatch player" aria-hidden="true"></i>Player</span>
+      <span><i class="swatch box" aria-hidden="true"></i>Box</span>
+      <span><i class="swatch target" aria-hidden="true"></i>Target</span>
+    </div>
+  </section>
+  <section aria-label="Solution and playback">
+    <div class="solution-heading">
+      <label for="solution">Solution</label>
+      <span id="solution-hint" class="hint">u d l r = walk · U D L R = push</span>
+    </div>
+    <textarea id="solution" rows="2" placeholder="Paste a solution here, or choose Solve." spellcheck="false" autocapitalize="off" autocomplete="off" aria-describedby="solution-hint" disabled></textarea>
+    <div class="actions">
+      <button id="run" type="button" disabled>▶ Run</button>
+      <button id="stop" type="button" disabled>■ Stop</button>
+      <span class="hint">5 steps / second</span>
+      <div class="solver-settings">
+        <span class="hint" title="Memory grows as needed; browser overhead is additional.">Memory limit: 4095 MiB</span>
+        <button id="solve" type="button" disabled>Solve</button>
+      </div>
+    </div>
+    <div class="status-area">
+      <p id="status" role="status" aria-live="polite">Loading maps…</p>
+      <output id="metrics" aria-live="off"></output>
+      <progress id="progress" aria-label="Playback progress" hidden></progress>
+    </div>
+  </section>
+  <noscript>Enable JavaScript to select maps, solve puzzles, and play solutions.</noscript>
+</main>
+<script type="module" src="./script.js"></script>
+</body>
+</html>

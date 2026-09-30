@@ -2,7 +2,7 @@
 
 ## Project overview
 
-Zig 0.16 Sokoban puzzle solver. Single-file implementation in `main.zig`.
+Zig 0.16 Sokoban puzzle solver. Core solver in `main.zig`; browser UI in `index.html` and `script.js`, with a thin WASM adapter in `wasm.zig`.
 
 ## Build & run
 
@@ -10,6 +10,9 @@ Zig 0.16 Sokoban puzzle solver. Single-file implementation in `main.zig`.
 zig build              # build (ReleaseFast)
 zig build run -- 1     # solve maze 1
 zig build test         # solutions, small-board oracle, matching, limits, parser tests
+zig build web          # static site + solver.wasm in zig-out/web
+just serve             # build and serve browser UI on localhost:8000
+just test-web          # WASM/playback/worker tests (Bun)
 ```
 
 ## Map file
@@ -44,7 +47,10 @@ Encoding: `X` wall, `@` player, `*` box (off target), `.` target, `&` box on tar
 
 ## Key files
 
-- `main.zig` - everything: parser, solver, tests
+- `main.zig` - shared parser, solver, native CLI, tests
+- `wasm.zig` - fetched map input, exported solver/result API, progress import
+- `index.html` / `script.js` - map preview, playback, Web Worker solver
+- `scripts/web.test.js` - WASM and playback integration tests
 - `sokoban-maps-60.txt` - puzzle data
 - `build.zig` / `build.zig.zon` - build config
 - `scripts/benchmark.py` - timeout-bounded full-map benchmark with independent solution verification

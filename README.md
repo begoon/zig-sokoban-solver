@@ -10,6 +10,51 @@ Requires Zig 0.16.0.
 zig build
 ```
 
+## Browser visualizer
+
+```sh
+zig build web
+python3 -m http.server 8000 --bind 127.0.0.1 --directory zig-out/web
+```
+
+Open http://127.0.0.1:8000/ (or run `just serve`). The browser fetches
+`sokoban-maps-60.txt`; the same fetched text is passed to the WebAssembly solver.
+
+- Select a map from the menu, arrow buttons, or left/right arrow keys. Arrow keys
+  keep their normal cursor behavior inside the solution text area. The selected
+  map number is saved in localStorage and restored on the next visit.
+- Maps share a preview area sized from the largest map, anchored at the top left.
+- Paste a solution and choose **Run** to play at five steps per second. Whitespace
+  is ignored; invalid moves are reported before playback starts.
+- **Stop** stops playback or cancels an active solve. Run restarts from the initial
+  position. Changing maps also stops active work and clears the solution.
+- **Solve** runs the existing Zig algorithm in a Web Worker, displays analysed
+  states, and fills the solution area when finished. Choose Run to play it.
+
+The static site consists of `index.html`, `script.js`, `solver.wasm`, and the map
+file, all emitted into `zig-out/web`. Serve that directory over HTTP; opening the
+HTML as a `file://` URL will not work with module workers and fetch. Serving the
+repository root also works after `zig build web`: the source page falls back to
+`zig-out/web/solver.wasm` when no adjacent WASM file exists. No application
+server, JavaScript framework, or external assets are required. The worker uses
+no time limit or state-count caps: Stop controls cancellation. It uses a fixed
+4095 MiB memory limit, shown beside Solve. This caps both live search allocations
+and the imported WebAssembly memory. Memory grows as needed rather than being
+fully allocated upfront. The maximum is one MiB below 4 GiB so WASM32 byte counts
+remain representable. Browser overhead is additional.
+Allocator growth and retained memory can exhaust the WASM ceiling before the
+live allocation budget is reached. The UI reports which memory limit stopped
+the search and its limit; neither result proves the puzzle unsolvable.
+
+```sh
+zig build web
+bun test scripts/web.test.js
+```
+
+Browser integration logic is tested in Bun: all maps, playback validation,
+WASM solutions and progress, custom fetched map data, and real worker-thread
+cancellation. These tests do not automate the browser UI.
+
 ## Usage
 
 ```sh
