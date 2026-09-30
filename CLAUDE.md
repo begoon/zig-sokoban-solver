@@ -21,7 +21,7 @@ Encoding: `X` wall, `@` player, `*` box (off target), `.` target, `&` box on tar
 ## Architecture
 
 - **State representation**: Player position (`Pos`) + box positions (`BitBoard` - array of u64 bitmask over grid cells).
-- **Search**: A* with priority queue. States keyed by normalized player + box bitboard hash (u64).
+- **Search**: A* with priority queue. Full states keyed by normalized player + box bitboard, with hash collisions resolved by equality. Track best paths, reopen cheaper states, and skip stale queue entries. Equal f scores prefer deeper states.
 - **Heuristic**: Optimal box-to-target assignment via bitmask DP (O(n * 2^n), admissible for n <= 16 boxes).
 - **Deadlock pruning**: Dead cell detection (reverse BFS from targets), 2x2 freeze deadlock.
 - **Player normalization**: Flood-fill reachable area, pick minimum position. Deduplicates states where player is in same reachable region.

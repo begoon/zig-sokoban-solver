@@ -401,19 +401,33 @@ fn normalizePlayer(player: Pos, boxes: *const BitBoard, grid: *const Grid) Pos {
     return min_pos;
 }
 
-fn makeStateHash(norm_player: Pos, boxes: *const BitBoard) u64 {
-    var h = std.hash.Wyhash.init(0);
-    h.update(std.mem.asBytes(&norm_player));
-    h.update(std.mem.sliceAsBytes(boxes));
-    return h.final();
-}
+const State = struct {
+    player: Pos, // Canonical representative of the reachable player region.
+    boxes: BitBoard,
+};
+
+const StateContext = struct {
+    pub fn hash(_: StateContext, state: State) u64 {
+        var h = std.hash.Wyhash.init(0);
+        h.update(std.mem.asBytes(&state.player));
+        h.update(std.mem.sliceAsBytes(&state.boxes));
+        return h.final();
+    }
+
+    pub fn eql(_: StateContext, a: State, b: State) bool {
+        return a.player.eql(b.player) and bbEql(&a.boxes, &b.boxes);
+    }
+};
+
+const StateMap = std.HashMap(State, u32, StateContext, std.hash_map.default_max_load_percentage);
 
 const BfsNode = struct {
     player: Pos,
     boxes: BitBoard,
     parent: u32,
     dir: Dir,
-    pushes: u16, // g-cost: number of pushes so far
+    norm_player: Pos,
+    pushes: u32, // g-cost: number of pushes so far
 };
 
 const MAX_STATES = 5_000_000;
@@ -426,16 +440,17 @@ fn solve(grid: *const Grid, initial_player: Pos, initial_boxes: *const BitBoard,
     const QItem = struct {
         idx: u32,
         f: u32,
+        g: u32,
     };
 
     var nodes = std.array_list.Managed(BfsNode).init(allocator);
     defer nodes.deinit();
 
-    var visited = std.AutoHashMap(u64, void).init(allocator);
+    var visited = StateMap.init(allocator);
     defer visited.deinit();
 
     const norm0 = normalizePlayer(initial_player, initial_boxes, grid);
-    try visited.put(makeStateHash(norm0, initial_boxes), {});
+    try visited.put(.{ .player = norm0, .boxes = initial_boxes.* }, 0);
 
     const h0 = grid.heuristic(initial_boxes);
     try nodes.append(.{
@@ -443,16 +458,19 @@ fn solve(grid: *const Grid, initial_player: Pos, initial_boxes: *const BitBoard,
         .boxes = initial_boxes.*,
         .parent = 0xFFFFFFFF,
         .dir = .up,
+        .norm_player = norm0,
         .pushes = 0,
     });
 
     var pq = std.PriorityQueue(QItem, void, struct {
         fn lessThan(_: void, a: QItem, b: QItem) std.math.Order {
-            return std.math.order(a.f, b.f);
+            if (a.f != b.f) return std.math.order(a.f, b.f);
+            if (a.g != b.g) return std.math.order(b.g, a.g);
+            return std.math.order(a.idx, b.idx);
         }
     }.lessThan).initContext({});
     defer pq.deinit(allocator);
-    try pq.push(allocator, .{ .idx = 0, .f = h0 });
+    try pq.push(allocator, .{ .idx = 0, .f = h0, .g = 0 });
 
     var expanded: u32 = 0;
 
@@ -460,6 +478,14 @@ fn solve(grid: *const Grid, initial_player: Pos, initial_boxes: *const BitBoard,
         const node_idx = item.idx;
         const node = nodes.items[node_idx];
         const g = node.pushes;
+        const state = State{ .player = node.norm_player, .boxes = node.boxes };
+        // A cheaper path may have replaced this queue entry. Parent nodes remain
+        // immutable so already-generated paths can still be reconstructed.
+        if (visited.get(state).? != node_idx) continue;
+        if (isSolved(&node.boxes, grid)) {
+            writeStdout("  solved after {d} states explored\n", .{expanded});
+            return try reconstructFullPath(grid, &nodes, node_idx, initial_player, allocator);
+        }
 
         expanded += 1;
         if (expanded % 100_000 == 0) {
@@ -526,27 +552,24 @@ fn solve(grid: *const Grid, initial_player: Pos, initial_boxes: *const BitBoard,
                     if (grid.hasFreezeDeadlock(&new_boxes, new_box)) continue;
 
                     const new_norm = normalizePlayer(box_pos, &new_boxes, grid);
-                    const hash = makeStateHash(new_norm, &new_boxes);
-                    const gop = try visited.getOrPut(hash);
-                    if (gop.found_existing) continue;
+                    const new_state = State{ .player = new_norm, .boxes = new_boxes };
+                    const new_g = g + 1;
+                    const gop = try visited.getOrPut(new_state);
+                    if (gop.found_existing and nodes.items[gop.value_ptr.*].pushes <= new_g) continue;
 
                     const new_idx: u32 = @intCast(nodes.items.len);
-                    const new_g = g + 1;
+                    gop.value_ptr.* = new_idx;
                     try nodes.append(.{
                         .player = box_pos,
                         .boxes = new_boxes,
                         .parent = node_idx,
                         .dir = push_dir,
+                        .norm_player = new_norm,
                         .pushes = new_g,
                     });
 
-                    if (isSolved(&new_boxes, grid)) {
-                        writeStdout("  solved after {d} states explored\n", .{expanded});
-                        return try reconstructFullPath(grid, &nodes, new_idx, initial_player, allocator);
-                    }
-
                     const h = grid.heuristic(&new_boxes);
-                    try pq.push(allocator, .{ .idx = new_idx, .f = @as(u32, new_g) + h });
+                    try pq.push(allocator, .{ .idx = new_idx, .f = new_g + h, .g = new_g });
                 }
             }
         }
@@ -572,6 +595,7 @@ fn reconstructFullPath(
     std.mem.reverse(u32, push_indices.items);
 
     var full_path = std.array_list.Managed(u8).init(allocator);
+    errdefer full_path.deinit();
     var current_player = initial_player;
 
     for (push_indices.items) |pi| {
@@ -620,6 +644,7 @@ fn findWalkPath(from: Pos, to: Pos, grid: *const Grid, boxes: *const BitBoard, a
                     came_dir[np.idx()] = dir;
                     if (np.eql(to)) {
                         var path = std.array_list.Managed(u8).init(allocator);
+                        errdefer path.deinit();
                         var pos = to;
                         while (!pos.eql(from)) {
                             try path.append(came_dir[pos.idx()].walkLabel());
@@ -812,4 +837,97 @@ test "parse nonexistent maze returns error" {
     const map_data = @embedFile("sokoban-maps-60.txt");
     const result = parseMap(map_data, 9999);
     try std.testing.expectError(error.MazeNotFound, result);
+}
+
+// Independent small-board oracle: Dijkstra over individual player steps, with
+// zero cost for walking and unit cost for pushing. No normalization or pruning.
+fn referencePushCount(grid: *const Grid, player: Pos, boxes: BitBoard) !?u32 {
+    const allocator = std.testing.allocator;
+    const Entry = struct { state: State, pushes: u32 };
+    var queue = std.PriorityQueue(Entry, void, struct {
+        fn compare(_: void, a: Entry, b: Entry) std.math.Order {
+            return std.math.order(a.pushes, b.pushes);
+        }
+    }.compare).initContext({});
+    defer queue.deinit(allocator);
+    var best = StateMap.init(allocator);
+    defer best.deinit();
+    const initial = State{ .player = player, .boxes = boxes };
+    try best.put(initial, 0);
+    try queue.push(allocator, .{ .state = initial, .pushes = 0 });
+    while (queue.pop()) |entry| {
+        if (best.get(entry.state).? != entry.pushes) continue;
+        if (isSolved(&entry.state.boxes, grid)) return entry.pushes;
+        for (dirs) |dir| {
+            const next = entry.state.player.move(dir) orelse continue;
+            if (grid.isWall(next)) continue;
+            var state = entry.state;
+            state.player = next;
+            var cost = entry.pushes;
+            if (bbTest(&state.boxes, next.idx())) {
+                const dest = next.move(dir) orelse continue;
+                if (grid.isWall(dest) or bbTest(&state.boxes, dest.idx())) continue;
+                bbClear(&state.boxes, next.idx());
+                bbSet(&state.boxes, dest.idx());
+                cost += 1;
+            }
+            const entry_best = try best.getOrPut(state);
+            if (entry_best.found_existing and entry_best.value_ptr.* <= cost) continue;
+            entry_best.value_ptr.* = cost;
+            try queue.push(allocator, .{ .state = state, .pushes = cost });
+        }
+    }
+    return null;
+}
+
+test "A star matches unpruned Dijkstra on small two-box boards" {
+    const data = "Maze: 0\n\nXXXXX\nX @ X\nX   X\nX. .X\nXXXXX\n";
+    const parsed = try parseMap(data, 0);
+    for (0..9) |a| {
+        for (a + 1..9) |b| {
+            var boxes = bbEmpty();
+            const pa = Pos{ .row = @intCast(1 + a / 3), .col = @intCast(1 + a % 3) };
+            const pb = Pos{ .row = @intCast(1 + b / 3), .col = @intCast(1 + b % 3) };
+            bbSet(&boxes, pa.idx());
+            bbSet(&boxes, pb.idx());
+            // Different player regions must remain distinct search states.
+            for (0..9) |pi| {
+                const player = Pos{ .row = @intCast(1 + pi / 3), .col = @intCast(1 + pi % 3) };
+                if (bbTest(&boxes, player.idx())) continue;
+                const expected = try referencePushCount(&parsed.grid, player, boxes);
+                const path = try solve(&parsed.grid, player, &boxes, std.testing.allocator);
+                if (path) |p| {
+                    defer std.testing.allocator.free(p);
+                    try verifyPath(&parsed.grid, player, &boxes, p);
+                    try std.testing.expectEqual(expected, @as(?u32, @intCast(countPushes(p))));
+                } else {
+                    try std.testing.expectEqual(@as(?u32, null), expected);
+                }
+            }
+        }
+    }
+}
+
+test "state equality resolves hash collisions" {
+    const CollidingContext = struct {
+        pub fn hash(_: @This(), _: State) u64 {
+            return 0;
+        }
+        pub fn eql(_: @This(), a: State, b: State) bool {
+            return (StateContext{}).eql(a, b);
+        }
+    };
+    var map = std.HashMap(State, u32, CollidingContext, 80).init(std.testing.allocator);
+    defer map.deinit();
+    const a = State{ .player = .{ .row = 1, .col = 1 }, .boxes = bbEmpty() };
+    var b = a;
+    bbSet(&b.boxes, 42);
+    var c = a;
+    c.player.col = 2;
+    try map.put(a, 3);
+    try map.put(b, 7);
+    try map.put(c, 9);
+    try std.testing.expectEqual(@as(u32, 3), map.get(a).?);
+    try std.testing.expectEqual(@as(u32, 7), map.get(b).?);
+    try std.testing.expectEqual(@as(u32, 9), map.get(c).?);
 }

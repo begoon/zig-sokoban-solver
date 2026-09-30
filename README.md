@@ -64,9 +64,9 @@ Directions: **U**p, **D**own, **L**eft, **R**ight.
 
 ## Algorithm
 
-The solver uses **A\* search** over the push state space:
+The solver uses **A\* search** over the push state space, minimizing pushes rather than total player steps:
 
-1. **State**: (normalized player position, set of box positions)
+1. **State**: (normalized player position, set of box positions). Hash collisions are resolved by comparing the complete state. The best known push count is tracked; cheaper paths reopen states, and stale queue entries are skipped. Equal `f` scores prefer deeper states, with insertion order as a deterministic final tie-break.
 2. **Player normalization**: Two states with the same box layout where the player is in the same reachable region are treated as identical. This is computed via flood-fill, picking the lexicographically smallest reachable cell.
 3. **Heuristic**: Minimum-weight bipartite matching of boxes to targets using bitmask DP — `O(n * 2^n)` where n is the number of boxes. This gives an admissible lower bound on remaining pushes.
 4. **Deadlock pruning**:
